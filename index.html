@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="ja" class="h-full bg-gray-950 text-gray-100">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GeoTIFF to Cloud Optimized GeoTIFF</title>
+  <!-- Tailwind via CDN for quick, responsive styling -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Subtle glassy card styling */
+    .glass { background: rgba(255,255,255,0.04); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.06); }
+    .gradient-text { background: linear-gradient(135deg, #5eead4, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  </style>
+</head>
+<body class="h-full min-h-screen bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950">
+  <div class="max-w-5xl mx-auto px-4 py-10 space-y-8">
+    <header class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div>
+        <p class="text-sm uppercase tracking-[0.3em] text-teal-300">Client-side COG</p>
+        <h1 class="text-3xl sm:text-4xl font-bold gradient-text">Cloud Optimized GeoTIFF Converter</h1>
+        <p class="text-gray-300 mt-2">500MBまでのGeoTIFFをブラウザのみでCOGへ変換。ストリーミング＋Web Workerでメモリ安全に処理します。</p>
+      </div>
+      <div class="flex items-center gap-3 text-sm text-gray-400">
+        <span class="px-3 py-1 rounded-full bg-gray-800 border border-gray-700">geotiff.js + @geotiff/cog</span>
+        <span class="px-3 py-1 rounded-full bg-gray-800 border border-gray-700">No server required</span>
+      </div>
+    </header>
+
+    <main class="grid lg:grid-cols-3 gap-6">
+      <section class="glass rounded-2xl p-6 lg:col-span-2 space-y-6 shadow-xl">
+        <label id="dropZone" for="fileInput" class="relative border-2 border-dashed border-gray-700 rounded-xl p-6 text-center transition hover:border-teal-400 hover:bg-gray-900/60 cursor-pointer block">
+          <input id="fileInput" type="file" accept=".tif,.tiff,image/tiff" class="sr-only" aria-label="GeoTIFF ファイルを選択" />
+          <p class="text-lg font-semibold">ファイルをドラッグ＆ドロップ、またはクリックして選択</p>
+          <p class="text-sm text-gray-400 mt-2">最大 500MB。COG未対応・破損ファイルも即座に検知します。</p>
+          <p class="text-xs text-gray-500 mt-1">変換にはブラウザメモリを利用します。進捗はリアルタイムで表示されます。</p>
+        </label>
+
+        <div id="fileMeta" class="hidden space-y-2 text-sm text-gray-300">
+          <div class="flex items-center justify-between">
+            <span>選択中:</span>
+            <span class="font-semibold" id="fileName"></span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span>サイズ:</span>
+            <span id="fileSize"></span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span>推定処理時間:</span>
+            <span id="preEstimate"></span>
+          </div>
+        </div>
+
+        <div class="space-y-3">
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-gray-300">進捗</span>
+            <span id="progressLabel" class="font-semibold text-teal-300">0%</span>
+          </div>
+          <div class="w-full bg-gray-800 rounded-full h-3 overflow-hidden">
+            <div id="progressBar" class="h-3 bg-gradient-to-r from-teal-400 to-purple-500 rounded-full transition-all duration-200" style="width:0%"></div>
+          </div>
+          <p id="eta" class="text-xs text-gray-400">残り時間: --</p>
+        </div>
+
+        <div class="flex flex-wrap gap-3">
+          <button id="convertBtn" class="px-4 py-2 rounded-lg bg-teal-500 text-gray-950 font-semibold hover:bg-teal-400 transition disabled:opacity-50 disabled:cursor-not-allowed">変換開始</button>
+          <button id="cancelBtn" class="px-4 py-2 rounded-lg bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700 transition disabled:opacity-50 disabled:cursor-not-allowed" disabled>キャンセル</button>
+        </div>
+
+        <div id="alert" class="hidden text-sm rounded-lg p-3"></div>
+      </section>
+
+      <aside class="glass rounded-2xl p-6 space-y-4 shadow-xl">
+        <h2 class="text-lg font-semibold">結果</h2>
+        <div id="result" class="text-sm text-gray-300 space-y-2">
+          <p class="text-gray-400">まだファイルは処理されていません。</p>
+        </div>
+
+        <div class="border-t border-gray-800 pt-4 space-y-2 text-sm text-gray-400">
+          <div class="flex items-center justify-between">
+            <span>COGバリデーション</span>
+            <span id="validationBadge" class="px-2 py-1 rounded-md bg-gray-800 border border-gray-700">待機中</span>
+          </div>
+          <ul id="validationList" class="list-disc list-inside space-y-1 text-gray-300"></ul>
+        </div>
+
+        <div class="border-t border-gray-800 pt-4 space-y-2 text-xs text-gray-500">
+          <p>・ブラウザのみで完結。入力ファイルは外部へ送信されません。</p>
+          <p>・ストリーミング＋Web WorkerでUIのフリーズを防止しています。</p>
+          <p>・キャンセルは即座に処理を中断し、メモリ解放を試みます。</p>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script type="module">
+    // CDN endpoints. `@latest` keeps things up-to-date without build steps.
+    const CDN = {
+      geotiff: 'https://cdn.jsdelivr.net/npm/geotiff@latest/dist/geotiff.min.js',
+      geotiffModule: 'https://cdn.jsdelivr.net/npm/geotiff@latest/dist/geotiff.module.min.js',
+      cog: 'https://cdn.jsdelivr.net/npm/@geotiff/cog@latest/dist/geotiff-cog.min.js',
+      cogModule: 'https://cdn.jsdelivr.net/npm/@geotiff/cog@latest/dist/geotiff-cog.module.js',
+    };
+
+    const ui = {
+      dropZone: document.getElementById('dropZone'),
+      fileInput: document.getElementById('fileInput'),
+      fileMeta: document.getElementById('fileMeta'),
+      fileName: document.getElementById('fileName'),
+      fileSize: document.getElementById('fileSize'),
+      preEstimate: document.getElementById('preEstimate'),
+      progressBar: document.getElementById('progressBar'),
+      progressLabel: document.getElementById('progressLabel'),
+      eta: document.getElementById('eta'),
+      convertBtn: document.getElementById('convertBtn'),
+      cancelBtn: document.getElementById('cancelBtn'),
+      alert: document.getElementById('alert'),
+      result: document.getElementById('result'),
+      validationBadge: document.getElementById('validationBadge'),
+      validationList: document.getElementById('validationList'),
+    };
+
+    const MAX_SIZE = 500 * 1024 * 1024; // 500MB limit
+    let currentFile = null;
+    let worker = null;
+    let startTime = null;
+    let cancelled = false;
+
+    function formatBytes(bytes) {
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let value = bytes;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+      }
+      return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unit]}`;
+    }
+
+    function humanETA(seconds) {
+      if (!Number.isFinite(seconds)) return '--';
+      if (seconds < 1) return '1秒未満';
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.round(seconds % 60);
+      return `${mins > 0 ? `${mins}分 ` : ''}${secs}秒`;
+    }
+
+    function heuristicEstimate(file) {
+      // Simple heuristic: assume ~40MB/s read+convert baseline with padding.
+      const throughput = 40 * 1024 * 1024;
+      const base = 2; // startup overhead in seconds
+      return base + file.size / throughput;
+    }
+
+    function setAlert(message, type = 'info') {
+      const colors = {
+        info: 'bg-blue-900/60 text-blue-200 border border-blue-600/60',
+        success: 'bg-emerald-900/60 text-emerald-200 border border-emerald-600/60',
+        error: 'bg-rose-900/60 text-rose-100 border border-rose-600/60',
+        warning: 'bg-amber-900/60 text-amber-100 border border-amber-600/60',
+      };
+      ui.alert.className = `text-sm rounded-lg p-3 ${colors[type] || colors.info}`;
+      ui.alert.textContent = message;
+      ui.alert.classList.remove('hidden');
+    }
+
+    function resetState() {
+      ui.progressBar.style.width = '0%';
+      ui.progressLabel.textContent = '0%';
+      ui.eta.textContent = '残り時間: --';
+      ui.validationBadge.textContent = '待機中';
+      ui.validationBadge.className = 'px-2 py-1 rounded-md bg-gray-800 border border-gray-700';
+      ui.validationList.innerHTML = '';
+      ui.result.innerHTML = '<p class="text-gray-400">まだファイルは処理されていません。</p>';
+      ui.alert.classList.add('hidden');
+    }
+
+    function updateProgress(value, etaSeconds) {
+      const pct = Math.max(0, Math.min(100, value));
+      ui.progressBar.style.width = `${pct}%`;
+      ui.progressLabel.textContent = `${pct.toFixed(1)}%`;
+      if (etaSeconds != null) ui.eta.textContent = `残り時間: ${humanETA(etaSeconds)}`;
+    }
+
+    function handleFile(file) {
+      resetState();
+      if (!file) return;
+      if (file.size > MAX_SIZE) {
+        currentFile = null;
+        ui.fileMeta.classList.add('hidden');
+        setAlert('500MBを超えるファイルは処理できません。より小さいGeoTIFFを選択してください。', 'error');
+        return;
+      }
+      currentFile = file;
+      ui.fileMeta.classList.remove('hidden');
+      ui.fileName.textContent = file.name;
+      ui.fileSize.textContent = formatBytes(file.size);
+      ui.preEstimate.textContent = `${humanETA(heuristicEstimate(file))} くらい`; // rough
+      setAlert(`${file.name} を読み込みました。「変換開始」を押してCOGに変換してください。`, 'info');
+    }
+
+    // Prevent browser from opening the file when dropped outside the target
+    window.addEventListener('dragover', (e) => e.preventDefault());
+    window.addEventListener('drop', (e) => e.preventDefault());
+
+    // Drag & drop support
+    ui.fileInput.addEventListener('click', () => { ui.fileInput.value = ''; });
+
+    ui.dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      ui.dropZone.classList.add('border-teal-400');
+    });
+    ui.dropZone.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      ui.dropZone.classList.add('border-teal-400');
+    });
+    ui.dropZone.addEventListener('dragleave', () => ui.dropZone.classList.remove('border-teal-400'));
+    ui.dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      ui.dropZone.classList.remove('border-teal-400');
+      const file = e.dataTransfer?.files?.[0];
+      if (file) {
+        // Mirror the drop into the hidden input for consistency.
+        try { ui.fileInput.files = e.dataTransfer.files; } catch (_) {}
+      }
+      handleFile(file);
+    });
+    ui.fileInput.addEventListener('change', (e) => handleFile(e.target.files?.[0]));
+
+    function getWorkerScript() {
+      return `
+        const CDN = ${JSON.stringify(CDN)};
+        let abort = false;
+
+        const loadModule = async (urlCandidates) => {
+          for (const url of urlCandidates) {
+            try {
+              return await import(url);
+            } catch (err) {
+              // try next
+            }
+          }
+          throw new Error('ライブラリの読み込みに失敗しました');
+        };
+
+        async function convert(file) {
+          const geoModule = await loadModule([CDN.geotiffModule, CDN.geotiff]);
+          const cogModule = await loadModule([CDN.cogModule, CDN.cog]);
+
+          const toCog = cogModule.toCog || cogModule.convertToCog || cogModule.default?.toCog;
+          const validateCog = cogModule.validateCog || cogModule.validate || cogModule.default?.validateCog;
+          if (!toCog) throw new Error('COG変換APIが見つかりません (@geotiff/cog)');
+
+          // Stream read to avoid spikes and to report progress.
+          const reader = file.stream().getReader();
+          const chunks = [];
+          let loaded = 0;
+          const total = file.size || 1;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (abort) throw new Error('ユーザーがキャンセルしました');
+            if (done) break;
+            loaded += value.byteLength;
+            chunks.push(value);
+            const progress = Math.min(99, (loaded / total) * 50); // first half for read
+            self.postMessage({ type: 'progress', value: progress, eta: null });
+          }
+          const sourceBuffer = await new Blob(chunks).arrayBuffer();
+          const tiff = await geoModule.fromArrayBuffer?.(sourceBuffer) || await geoModule.fromBlob?.(new Blob([sourceBuffer]));
+          if (!tiff) throw new Error('GeoTIFFの読み込みに失敗しました');
+
+          const onProgress = (value) => {
+            const pct = 50 + value * 0.5; // map 0..100 => 50..100
+            self.postMessage({ type: 'progress', value: pct, eta: null });
+            if (abort) throw new Error('ユーザーがキャンセルしました');
+          };
+
+          // Convert to COG (options kept conservative for compatibility)
+          const cogResult = await toCog(tiff, {
+            blockSize: 512,
+            compress: 'deflate',
+            predictor: 2,
+            resampling: 'average',
+            allowBigTiff: true,
+            onProgress,
+          });
+
+          const cogBuffer = cogResult?.buffer || cogResult?.arrayBuffer || cogResult;
+          if (!cogBuffer) throw new Error('COG変換結果が取得できませんでした');
+
+          // Basic validation similar to rio-cogeo validate (lightweight)
+          let validation = [];
+          try {
+            const cogTiff = await geoModule.fromArrayBuffer?.(cogBuffer) || await geoModule.fromBlob?.(new Blob([cogBuffer]));
+            const image = await cogTiff.getImage();
+            const isTiled = image.isTiled?.();
+            const hasOverviews = (cogTiff.getImageCount?.() || 1) > 1;
+            const blockSize = [image.getTileWidth?.(), image.getTileLength?.()];
+            if (isTiled) validation.push({ ok: true, msg: 'タイル化済み' }); else validation.push({ ok: false, msg: 'タイル化されていません' });
+            if (blockSize?.[0] && blockSize?.[1]) validation.push({ ok: blockSize[0] === blockSize[1], msg: `ブロックサイズ ${blockSize.join('x')}` });
+            validation.push({ ok: hasOverviews, msg: hasOverviews ? 'オーバービューあり' : 'オーバービューなし' });
+            const layout = image.fileDirectory?.TileOffsets?.length || 0;
+            validation.push({ ok: layout > 0, msg: layout > 0 ? 'TileOffsets あり' : 'TileOffsets 不正' });
+          } catch (err) {
+            validation.push({ ok: false, msg: '検証に失敗: ' + err.message });
+          }
+
+          return { buffer: cogBuffer, validation };
+        }
+
+        self.onmessage = async (event) => {
+          const { type, file } = event.data;
+          if (type === 'abort') {
+            abort = true;
+            return;
+          }
+          if (type !== 'convert' || !file) return;
+          abort = false;
+          try {
+            const result = await convert(file);
+            self.postMessage({ type: 'done', ...result }, [result.buffer]);
+          } catch (err) {
+            self.postMessage({ type: 'error', message: err?.message || String(err) });
+          }
+        };
+      `;
+    }
+
+    function ensureWorker() {
+      if (worker) return worker;
+      const blob = new Blob([getWorkerScript()], { type: 'application/javascript' });
+      worker = new Worker(URL.createObjectURL(blob), { type: 'module' });
+      worker.onmessage = (event) => {
+        const { type } = event.data;
+        if (type === 'progress') {
+          const elapsed = (Date.now() - startTime) / 1000;
+          const pct = event.data.value ?? 0;
+          const eta = pct > 0 ? (elapsed / (pct / 100)) - elapsed : null;
+          updateProgress(pct, eta);
+        } else if (type === 'done') {
+          finalizeDownload(event.data.buffer, event.data.validation);
+        } else if (type === 'error') {
+          handleError(event.data.message);
+        }
+      };
+      return worker;
+    }
+
+    function handleError(message) {
+      ui.convertBtn.disabled = false;
+      ui.cancelBtn.disabled = true;
+      setAlert(message || '不明なエラーが発生しました', 'error');
+    }
+
+    function finalizeDownload(arrayBuffer, validation = []) {
+      ui.convertBtn.disabled = false;
+      ui.cancelBtn.disabled = true;
+      updateProgress(100, 0);
+      const blob = new Blob([arrayBuffer], { type: 'image/tiff' });
+      const url = URL.createObjectURL(blob);
+      const name = currentFile ? `${currentFile.name.replace(/\.(tif|tiff)$/i, '')}_cog.tif` : 'output_cog.tif';
+      ui.result.innerHTML = `
+        <div class="space-y-2">
+          <p class="text-emerald-200 font-semibold">変換が完了しました</p>
+          <a href="${url}" download="${name}" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500 text-gray-900 font-semibold hover:bg-emerald-400 transition">ダウンロード (${name})</a>
+        </div>`;
+
+      // Validation display
+      ui.validationList.innerHTML = '';
+      let allOk = true;
+      validation.forEach((item) => {
+        const li = document.createElement('li');
+        li.textContent = item.msg;
+        li.className = item.ok ? 'text-emerald-200' : 'text-amber-200';
+        if (!item.ok) allOk = false;
+        ui.validationList.appendChild(li);
+      });
+      ui.validationBadge.textContent = allOk ? 'OK' : '要確認';
+      ui.validationBadge.className = `px-2 py-1 rounded-md border ${allOk ? 'bg-emerald-900/60 border-emerald-500 text-emerald-100' : 'bg-amber-900/60 border-amber-500 text-amber-100'}`;
+      setAlert('変換が完了しました。検証結果を確認してください。', allOk ? 'success' : 'warning');
+    }
+
+    ui.cancelBtn.addEventListener('click', () => {
+      if (!worker) return;
+      cancelled = true;
+      worker.postMessage({ type: 'abort' });
+      ui.cancelBtn.disabled = true;
+      ui.convertBtn.disabled = false;
+      setAlert('処理をキャンセルしました。', 'warning');
+    });
+
+    ui.convertBtn.addEventListener('click', () => {
+      if (!currentFile) {
+        setAlert('GeoTIFFファイルを選択してください。', 'warning');
+        return;
+      }
+      cancelled = false;
+      setAlert('変換を開始しました。ブラウザを閉じないでください。', 'info');
+      ui.convertBtn.disabled = true;
+      ui.cancelBtn.disabled = false;
+      startTime = Date.now();
+      updateProgress(1, heuristicEstimate(currentFile));
+      const wk = ensureWorker();
+      wk.postMessage({ type: 'convert', file: currentFile });
+    });
+  </script>
+</body>
+</html>
